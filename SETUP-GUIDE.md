@@ -144,14 +144,26 @@ docs/INCIDENTS-AND-LESSONS.md). You still need to:
 
 ```
 gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <OWNER>/<REPO>   # from `claude setup-token`, run in YOUR OWN terminal
-gh secret set PROJECT_TOKEN --repo <OWNER>/<REPO>             # a classic PAT scoped to ONLY the `project` permission
+gh secret set PROJECT_TOKEN --repo <OWNER>/<REPO>             # a classic PAT scoped to `project` + `read:org`
 ```
 
 **Do not** reuse a broad personal `gh auth token` as `PROJECT_TOKEN` even
 though it may have the right scope — it also carries `repo`/`workflow`/etc.,
 handing the Actions runner (and the LLM agent running inside it) far more
 privilege than the board-wiring calls need. Create/reuse a PAT scoped to
-`project` only.
+`project` + `read:org` only.
+
+**`read:org` is required, even for a User-owned board.** A `PROJECT_TOKEN`
+scoped to `project` alone makes every `gh project item-*` command fail
+with `unknown owner type` — the `gh` CLI needs `read:org` just to resolve
+what kind of account `--owner <name>` is, before it can do anything else,
+regardless of whether the answer turns out to be "a User" rather than an
+organization. See "Incident: PROJECT_TOKEN silently failed on every board
+call" in `docs/INCIDENTS-AND-LESSONS.md` for how this was diagnosed (a
+disposable `workflow_dispatch` debug workflow, since an agent's own Bash
+output is hidden by design and can't be inspected after the fact) and why
+it went unnoticed for so long (no workflow prompt verifies its own board
+calls succeeded).
 
 GitHub secrets are write-only — there is no way to copy an existing
 secret's value from one repo to another via API. If you don't have the raw

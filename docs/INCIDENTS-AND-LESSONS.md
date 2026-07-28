@@ -346,3 +346,58 @@ set, with real ids for anything that already exists.
 **Lesson:** a status model with only "not started" and "finished" buckets
 hides exactly the information a human glancing at a board wants most —
 what's actually in flight right now.
+
+## Incident: PROJECT_TOKEN silently failed on every board call for its entire history
+
+Even after both fixes above, issues kept failing to appear on the board —
+not intermittently, **every single time**, across every coder run
+checked. The coder's own board-wiring commands never surfaced an error
+anywhere visible (PR descriptions, issue comments, run summaries all
+looked normal), because `claude-code-action` hides an agent's full Bash
+output by design (`Running Claude Code via SDK (full output hidden for
+security)`), and the coder's prompt has no instruction to verify a
+`gh project` call's exit code or stop on failure — a failed board update
+and a successful one look identical from the outside.
+
+**Diagnosis:** GitHub Actions logs for an in-progress agent run don't
+stream partial tool output, and a completed agent run's own logs only
+ever echo the *prompt text*, never command results — there is no way to
+observe the actual failure through the normal pipeline. The fix was to
+stop trying to diagnose it *through* the agent entirely: a disposable
+`workflow_dispatch`-triggered debug workflow (no LLM involved, just a
+plain `run:` step using the same `${{ secrets.PROJECT_TOKEN }}`)
+reproduced the exact `gh project item-list ... --owner <name>` call the
+coder makes, and it failed immediately with `unknown owner type` — a
+concrete, googleable error, not a vague timeout or permission wall.
+
+**Root cause:** `PROJECT_TOKEN` was a classic PAT scoped to `project`
+only — this template's own (at-the-time) guidance. That is not
+sufficient: the `gh` CLI needs `read:org` to resolve what kind of GitHub
+account `--owner <name>` even refers to, before it can do anything else —
+without it, every `gh project` subcommand taking `--owner` fails this way,
+**even when the owner turns out to be a plain User account, not an org**
+(confirmed separately via `curl .../orgs/<owner>` → 404, `type: "User"` on
+`/user` — `read:org` is required for the CLI's own type-check, not
+because the target is actually an org). A follow-up check inside the same
+disposable workflow (`curl -sI -H "Authorization: token $TOK"
+https://api.github.com/user | grep x-oauth-scopes`) confirmed the token's
+real granted scopes directly from the response header — this is the only
+way to verify what scopes a secret actually carries, since GitHub secrets
+are write-only and cannot be read back once set.
+
+**Fix:** added `read:org` to the PAT's scopes (editable in place on
+GitHub's classic-PAT edit page — this does not change the token's value,
+so no secret rotation was needed) and re-verified with the same disposable
+diagnostic workflow before deleting it.
+
+**Lesson, twice over:**
+1. When an automated agent's tool calls are opaque by design (hidden for
+   security, or just not logged), don't try to debug the failure through
+   the agent — reproduce the exact same call in a minimal, non-agent
+   context (a bare script, a `workflow_dispatch` job, a local terminal)
+   where you can actually see the raw result.
+2. Any external credential a pipeline depends on should have its actual,
+   effective permissions verified empirically at setup time — "the docs
+   say this scope is enough" is a claim to test, not a fact to trust,
+   especially for a CLI (`gh project`) whose real scope requirements
+   aren't fully obvious from the permission name alone.
