@@ -144,25 +144,37 @@ docs/INCIDENTS-AND-LESSONS.md). You still need to:
 
 ```
 gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <OWNER>/<REPO>   # from `claude setup-token`, run in YOUR OWN terminal
-gh secret set PROJECT_TOKEN --repo <OWNER>/<REPO>             # a classic PAT scoped to `project` + `read:org`
+gh secret set PROJECT_TOKEN --repo <OWNER>/<REPO>             # a classic PAT scoped to `project` + `read:org` + `repo`
 ```
 
 **Do not** reuse a broad personal `gh auth token` as `PROJECT_TOKEN` even
-though it may have the right scope — it also carries `repo`/`workflow`/etc.,
-handing the Actions runner (and the LLM agent running inside it) far more
+though it may have the right scope — it also carries `workflow`/`gist`/etc.,
+handing the Actions runner (and the LLM agent running inside it) more
 privilege than the board-wiring calls need. Create/reuse a PAT scoped to
-`project` + `read:org` only.
+`project` + `read:org` + `repo` only.
 
 **`read:org` is required, even for a User-owned board.** A `PROJECT_TOKEN`
 scoped to `project` alone makes every `gh project item-*` command fail
 with `unknown owner type` — the `gh` CLI needs `read:org` just to resolve
 what kind of account `--owner <name>` is, before it can do anything else,
 regardless of whether the answer turns out to be "a User" rather than an
-organization. See "Incident: PROJECT_TOKEN silently failed on every board
-call" in `docs/INCIDENTS-AND-LESSONS.md` for how this was diagnosed (a
+organization.
+
+**`repo` is *also* required, on a private repo, for `item-add` specifically**
+— separately from the `read:org` fix above. `project` + `read:org` is
+enough for *reading* the board (`item-list`, `item-edit` on items already
+there), but resolving a repo-hosted issue URL into a new project item
+(`item-add`) needs the token to be able to read that issue via the repo
+API first, which `read:org` does not cover. This surfaced as a second,
+distinct error (`resource not found, please check the URL`) *after* the
+`read:org` fix, on issues seeded and worked normally otherwise — testing
+one `gh project` operation does not verify the others.
+
+See "Incident: PROJECT_TOKEN silently failed on every board call" and its
+follow-on in `docs/INCIDENTS-AND-LESSONS.md` for how both were diagnosed (a
 disposable `workflow_dispatch` debug workflow, since an agent's own Bash
 output is hidden by design and can't be inspected after the fact) and why
-it went unnoticed for so long (no workflow prompt verifies its own board
+they went unnoticed for so long (no workflow prompt verifies its own board
 calls succeeded).
 
 GitHub secrets are write-only — there is no way to copy an existing

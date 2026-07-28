@@ -401,3 +401,34 @@ diagnostic workflow before deleting it.
    say this scope is enough" is a claim to test, not a fact to trust,
    especially for a CLI (`gh project`) whose real scope requirements
    aren't fully obvious from the permission name alone.
+
+## Follow-on incident: read:org fixed reads, but writes still silently failed
+
+After the `read:org` fix above, board reads worked (`gh project
+item-list` returned real data) — but newly-seeded issues still never
+appeared on the board. A coder agent's own PR description eventually
+stated it had tried and failed: `PROJECT_TOKEN` only carries
+`project`/`read:org` (no `repo`), so `gh project item-add`/`item-edit`
+can't resolve the issue. That claim was verified the same way as before —
+a disposable diagnostic ran `item-list` (still worked) immediately
+followed by `item-add --url <issue-url>` with the identical token.
+`item-list` succeeded; `item-add` failed immediately with `resource not
+found, please check the URL` — a distinct error, confirming a genuinely
+separate gap, not a recurrence.
+
+**Root cause:** listing/editing items already on a board is one
+permission surface; resolving a *repo-hosted issue URL* into a new
+project item is another — the latter needs the token to read that issue
+via the repo API first, which requires `repo` scope on a **private**
+repository specifically (`read:org` doesn't cover it).
+
+**Fix:** added `repo` to the same PAT (again editable in place, no value
+change).
+
+**Lesson:** verifying one operation of a multi-operation tool (`gh
+project`'s *read* subcommands) does not verify the others (`item-add`, a
+*write*-adjacent, cross-resource operation). When empirically testing a
+credential's effective permissions, test every distinct operation your
+pipeline actually calls, not just the first one that happens to fail
+loudly — read and write access to the same nominal resource can require
+different scopes entirely.
