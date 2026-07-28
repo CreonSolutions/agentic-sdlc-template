@@ -94,6 +94,30 @@ jobs:
               repeatedly on the reference project; see
               docs/INCIDENTS-AND-LESSONS.md.)
 
+            Before doing anything else, claim this issue's board card so a
+            human glancing at the board can see it's actively being worked,
+            not just sitting in "Ready for Dev" the whole time you're
+            coding:
+            ```
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-list <PROJECT_NUMBER> --owner <OWNER> --format json --limit 200
+            # find the entry whose content.number == ${{ github.event.issue.number }}, read its id
+            ```
+            **If no entry matches this issue number** (issues seeded
+            directly -- bug reports, or manually-created task issues -- skip
+            the clarifier by design and so are never added to the board by
+            anything else), add it yourself:
+            ```
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-add <PROJECT_NUMBER> --owner <OWNER> --url "https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}" --format json --jq '.id'
+            ```
+            Then, with whichever item id you have (found or just added), set
+            its status to "In Progress":
+            ```
+            GH_TOKEN="$PROJECT_TOKEN" gh project item-edit --id <item-id> --project-id <PROJECT_ID> --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_PROGRESS_OPTION_ID>
+            ```
+            Do this before writing any test or code -- the whole point is
+            that it's visible for the entire duration of your work, not just
+            at the end.
+
             When the implementation and its test(s) are green:
             1. Create a branch named `agent/issue-${{ github.event.issue.number }}-<slug>`.
             2. Commit your changes.
@@ -101,21 +125,9 @@ jobs:
                in the description, summarizing what you built and how it was
                tested.
             4. Label the PR `awaiting-review`.
-            5. Move this issue's project board card to "In Review" yourself --
-               do not assume a built-in automation will do it:
-               ```
-               GH_TOKEN="$PROJECT_TOKEN" gh project item-list <PROJECT_NUMBER> --owner <OWNER> --format json --limit 200
-               # find the entry whose content.number == ${{ github.event.issue.number }}, read its id
-               ```
-               **If no entry matches this issue number** (this happens for
-               issues seeded directly -- bug reports, or manually-created
-               task issues -- which skip the clarifier by design and so are
-               never added to the board by anything else), add it yourself
-               rather than skipping this step:
-               ```
-               GH_TOKEN="$PROJECT_TOKEN" gh project item-add <PROJECT_NUMBER> --owner <OWNER> --url "https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}" --format json --jq '.id'
-               ```
-               Then, with whichever item id you have (found or just added):
+            5. Move this issue's project board card from "In Progress" to
+               "In Review" (same item id you already found/added above --
+               do not assume a built-in automation will do it):
                ```
                GH_TOKEN="$PROJECT_TOKEN" gh project item-edit --id <item-id> --project-id <PROJECT_ID> --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_REVIEW_OPTION_ID>
                ```

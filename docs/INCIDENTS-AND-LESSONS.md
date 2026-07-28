@@ -314,3 +314,35 @@ implicit dependency that fails silently the moment the prior step is
 skipped for a legitimate reason (here, the clarifier being skipped on
 purpose for directly-seeded issues) — every consumer of shared state
 should be able to establish that state itself, not just react to it.
+
+## Design gap: no "In Progress" status — a card only ever showed queued or finished work
+
+Related to the incident above, but a separate, smaller gap: even once every
+issue reliably reached the board, the coder only ever touched it **once, at
+the very end** — opening the PR and moving straight to "In Review." There
+was no status for "an agent is actively coding this right now." From
+outside, an in-flight task was indistinguishable from one that hadn't
+started yet (both sat in "Ready for Dev"), which is not the usual Kanban
+practice of Backlog → In Progress → In Review → Done.
+
+**Fix:** added a genuine "In Progress" option to the Status field (see
+`scripts/create-project-board.sh` and `SETUP-GUIDE.md` step 3), and gave
+the coder a new *first* instruction — before writing any test or code — to
+claim the board card (adding it if missing, same fallback as the incident
+above) and set it to "In Progress." The existing "move to In Review" step
+at the end is unchanged.
+
+If you're adding this option to an **existing** board (not a fresh one),
+use `updateProjectV2Field`'s `singleSelectOptions` input with the existing
+options' real `id` values included alongside the new one without an `id` —
+this input type accepts an optional `id` per option specifically so you can
+add one new option without disturbing the identity (and therefore every
+existing item's current value) of the ones already there. Omitting an
+existing option's `id`, or leaving an existing option out of the list
+entirely, risks GitHub creating a new option (and orphaning items still
+set to the old one) instead of preserving it — always pass the complete
+set, with real ids for anything that already exists.
+
+**Lesson:** a status model with only "not started" and "finished" buckets
+hides exactly the information a human glancing at a board wants most —
+what's actually in flight right now.

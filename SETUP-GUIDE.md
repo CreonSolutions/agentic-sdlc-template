@@ -63,6 +63,7 @@ mutation {
       {name: "Backlog", color: GRAY, description: ""},
       {name: "Needs Clarification", color: RED, description: ""},
       {name: "Ready for Dev", color: YELLOW, description: ""},
+      {name: "In Progress", color: PURPLE, description: "Coder agent is actively implementing this"},
       {name: "In Review", color: BLUE, description: ""},
       {name: "Done", color: GREEN, description: ""}
     ]
