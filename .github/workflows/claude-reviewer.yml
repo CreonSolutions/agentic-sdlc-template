@@ -1,0 +1,136 @@
+name: Claude Reviewer
+
+# "A different model reviews each PR against the spec before merge." Runs a
+# different model id than the coder workflow, on purpose -- opus reviewing
+# sonnet's work is a real second opinion, not just a different prompt on the
+# same model. Never edits code, never merges -- approves or requests
+# changes only.
+#
+# REQUIRED EDITS before this workflow will work on your repo:
+#   - Adjust the constitution/spec/contract-file references in the prompt
+#     to match your project's actual paths and article numbers.
+#   - The CI-status gate below (step 0) depends on YOUR ci.yml labeling PRs
+#     `ci-green`/`ci-red` as its own last step -- see ci.yml in this
+#     template and docs/INCIDENTS-AND-LESSONS.md for why that's the only
+#     reliable signal (gh pr checks / mergeStateStatus are both dead ends,
+#     for different structural reasons).
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  checks: read
+  statuses: read
+
+jobs:
+  review:
+    # `github.event.action == 'labeled'` fires once PER LABEL applied, even
+    # when several labels are set atomically at PR creation. Checking only
+    # "is awaiting-review currently present" re-fires this job once per
+    # redundant labeled event if a PR is ever opened with 2+ labels at once.
+    # For a 'labeled' action specifically, only proceed if THIS event's own
+    # label was awaiting-review; 'opened'/'synchronize' are unaffected. See
+    # "the reviewer had the same multi-label self-trigger bug" in
+    # docs/INCIDENTS-AND-LESSONS.md.
+    if: >
+      contains(github.event.pull_request.labels.*.name, 'awaiting-review') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'awaiting-review')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The coder is itself a bot actor (the "claude" GitHub App
+          # identity), and it's the one that opens/labels the PR this
+          # workflow reacts to. claude-code-action refuses bot-initiated
+          # runs by default (a real anti-loop safeguard) -- allow-list just
+          # our own coder, not '*'.
+          allowed_bots: "claude"
+          claude_args: |
+            --max-turns 30
+            --model claude-opus-5
+            --allowedTools Read,Bash,Grep,Glob
+          prompt: |
+            You are the REVIEWER agent for this project's spec-driven
+            pipeline -- a deliberately different model than the one that
+            wrote this PR, reviewing independently.
+
+            PR #${{ github.event.pull_request.number }}: "${{ github.event.pull_request.title }}"
+
+            Steps:
+            0. **Check real CI status FIRST, as a hard gate -- via the
+               `ci-green`/`ci-red` label, NOT `mergeStateStatus` and NOT
+               `gh pr checks`.** Both of those look like they should work
+               and don't: `gh pr checks`/check-runs/commit-status/actions-runs
+               APIs commonly 403 if the GitHub App installation has no
+               Checks permission (not fixable from this workflow file); and
+               `mergeStateStatus` is structurally unreliable here because
+               THIS review workflow is itself triggered by `pull_request:`,
+               so it is its own pending check on the PR's head commit for
+               its entire run -- `mergeStateStatus` can never read `CLEAN`
+               while you're the one asking. Instead, `ci.yml`'s own last job
+               step labels the PR `ci-green` or `ci-red` directly based on
+               its own outcome (no checks-API involved). Read the PR's
+               current labels
+               (`gh pr view ${{ github.event.pull_request.number }} --json labels`)
+               and treat anything other than `ci-green` present (i.e.
+               `ci-red`, or neither label yet applied) as an automatic
+               blocker -- you MUST NOT approve without `ci-green` present,
+               full stop, regardless of how clean the diff looks otherwise.
+               If `ci-green` is present, proceed to the rest of your own
+               review below as an *additional* check, not a replacement.
+            1. Read `.specify/memory/constitution.md` -- every principle in
+               it is a review-blocker if violated. In particular, flag any
+               out-of-scope feature the constitution explicitly excludes.
+            2. Read the linked issue and its spec file under `specs/`.
+            3. Read your contract file (e.g. `api/openapi.yaml`) if the diff
+               touches network calls -- flag ANY deviation from the contract
+               as a blocker, and flag a contract-file edit itself as a
+               blocker (contract changes require human review).
+            4. Review the actual diff (`gh pr diff ${{ github.event.pull_request.number }}`)
+               for:
+               - Test-first evidence -- a real failing test the
+                 implementation makes pass, not one written to match the
+                 implementation after the fact.
+               - No real credential/secret values anywhere in the diff --
+                 only placeholder tokens.
+               - YAGNI -- scope creep beyond the linked issue.
+               - Ordinary correctness and security issues.
+            5. Post your review with `gh pr review ${{ github.event.pull_request.number }}`:
+               `--approve` only if there are no blockers; otherwise
+               `--request-changes` with specific, actionable comments. If the
+               PR was opened by the same bot identity as this review (it
+               usually is, since the coder opens its own PRs), GitHub will
+               reject `--approve`/`--request-changes` with a "can not
+               approve/request changes on your own pull request" error --
+               fall back to `gh pr review ${{ github.event.pull_request.number }} --comment --body "..."`
+               in that case, and say so explicitly at the top of the body so
+               a human knows to treat it as blocking.
+            6. **Regardless of which path in step 5 you took**, the FIRST
+               LINE of your review body MUST be exactly one of these two
+               machine-readable markers (an HTML comment, invisible when
+               rendered) so the auto-revise workflow can act on it without
+               parsing prose:
+               ```
+               <!-- REVIEWER_VERDICT: APPROVE -->
+               ```
+               or
+               ```
+               <!-- REVIEWER_VERDICT: REQUEST_CHANGES -->
+               ```
+               Everything else in your review (the human-readable verdict
+               heading, the constitution checklist, the blockers) follows
+               after that marker line, unchanged from your normal format.
+
+            You MUST NOT edit any files or push commits. You MUST NOT merge
+            the PR under any circumstances -- approval here is a signal for
+            merge, not the merge itself.

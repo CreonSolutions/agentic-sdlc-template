@@ -1,0 +1,116 @@
+name: Claude Coder (Revise)
+
+# Closes the loop the basic clarifier/coder/reviewer design is missing on
+# its own: when the reviewer requests changes, this re-invokes the coder on
+# the SAME PR branch to address the feedback. Pushing new commits
+# re-triggers claude-reviewer.yml's existing `synchronize` trigger
+# automatically, so this workflow's only job is "read the verdict, fix it,
+# push" -- the re-review happens on its own.
+#
+# Safety cap: if the same PR has already accumulated 3+ request-changes
+# verdicts SINCE THE LAST PUSH, stop auto-revising and hand it to a human
+# instead. This measures strikes against the *current* commit, not
+# lifetime strikes -- see the "auto-revise cap" incident in
+# docs/INCIDENTS-AND-LESSONS.md for why an all-time counter is a trap (a PR
+# that once crossed the cap, even from a since-fixed duplicate-trigger bug,
+# would otherwise stay permanently blocked forever).
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  checks: read
+  statuses: read
+
+jobs:
+  revise:
+    if: >
+      github.event.review.user.login == 'claude[bot]' &&
+      (github.event.review.state == 'changes_requested' ||
+       contains(github.event.review.body, 'REVIEWER_VERDICT: REQUEST_CHANGES'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Count request-changes verdicts since the last push to this PR
+        id: cap
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Count only reviews submitted AFTER the current HEAD commit's date --
+          # not all-time total. `gh ... --jq EXPR` takes exactly one expression
+          # argument -- it does NOT pass through raw jq flags like --arg, so
+          # that has to happen in a separate, plain `jq` invocation piped from
+          # gh's JSON output.
+          HEAD_DATE=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits --jq 'sort_by(.commit.committer.date) | last | .commit.committer.date')
+          COUNT=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json reviews \
+            | jq --arg since "$HEAD_DATE" '[.reviews[] | select(.body | contains("REVIEWER_VERDICT: REQUEST_CHANGES")) | select(.submittedAt >= $since)] | length')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "HEAD commit date: $HEAD_DATE -- request-changes verdicts since then: $COUNT"
+
+      - name: Give up and flag for a human past the cap
+        if: fromJSON(steps.cap.outputs.count) >= 3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body \
+            "Auto-revise cap reached (3 request-changes verdicts on this PR) -- stopping automatic revision. A human needs to take it from here rather than keep looping."
+          gh pr edit ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --add-label blocked
+
+      - uses: actions/checkout@v4
+        if: fromJSON(steps.cap.outputs.count) < 3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        if: fromJSON(steps.cap.outputs.count) < 3
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # This run is itself triggered by the reviewer bot's review
+          # submission -- same anti-loop safeguard as claude-reviewer.yml.
+          allowed_bots: "claude"
+          claude_args: |
+            --max-turns 90
+            --model claude-sonnet-5
+            --allowedTools Read,Write,Edit,Bash,Grep,Glob
+          prompt: |
+            You are the CODER agent, back on PR #${{ github.event.pull_request.number }}
+            ("${{ github.event.pull_request.title }}") to address reviewer
+            feedback -- you are NOT starting a new task.
+
+            The reviewer just posted this verdict:
+            ${{ github.event.review.body }}
+
+            Rules (binding -- read `.specify/memory/constitution.md` first):
+            - Address every concrete "Blocker" item in the review above.
+              Where the review offers a choice between two valid fixes, pick
+              one and say which you picked and why in your summary comment
+              -- don't leave it unresolved.
+            - Do NOT open a new PR and do NOT create a new branch -- commit
+              directly to the existing branch
+              `${{ github.event.pull_request.head.ref }}` (already checked
+              out). Pushing here re-triggers the reviewer automatically.
+            - Do NOT change the PR's labels, do NOT approve/merge anything,
+              and do NOT touch files under `.github/workflows/` (your token
+              cannot push those anyway -- if a blocker requires one, say so
+              explicitly in a comment instead of attempting it).
+            - If a "blocker" in the review is actually a request for a
+              product/scope decision only a human can make (rather than a
+              concrete code fix), say so in a comment and label the PR
+              `blocked` rather than guessing.
+            - Same contract-first / test-first / YAGNI rules as your first
+              pass on this PR apply unchanged.
+            - **Formatting, unconditionally, every time:** run your
+              project's formatter (applying it, not just checking) as the
+              LAST step before you commit -- regardless of whether this
+              round's blockers mention formatting at all. Do not skip this
+              step just because the current review didn't flag a format
+              issue.
+
+            When done, commit and push to the existing branch, and leave a
+            short comment on the PR summarizing exactly what you changed in
+            response to each blocker.

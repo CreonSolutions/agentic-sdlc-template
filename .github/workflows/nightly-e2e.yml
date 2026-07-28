@@ -1,0 +1,73 @@
+name: Nightly E2E
+
+# Nightly E2E failures auto-file an issue, re-entering the agent queue at
+# the clarifier -- "the loop closes itself." Until the app/project actually
+# exists enough to have an E2E suite, this should be a clean no-op rather
+# than a false red every night.
+#
+# REQUIRED EDITS before this workflow will work on your repo:
+#   - Replace the "Check whether there's something to test yet" probe and
+#     the "Run E2E suite" step with your actual stack's setup + test-runner
+#     commands (this template ships a placeholder shell-script probe).
+#   - Adjust the cron schedule to whatever "off hours" means for your
+#     project's users/market/timezone.
+#
+# Gate on more than just "project scaffolding exists" -- e.g. also require
+# your real E2E test directory to exist. Otherwise the window between
+# "dependencies file lands" and "a real E2E suite lands" produces a nightly
+# false-red every night (running a test command against a directory that
+# doesn't exist yet), auto-filing e2e-failure issues that re-enter the
+# clarifier queue for no real reason. See docs/INCIDENTS-AND-LESSONS.md.
+
+on:
+  schedule:
+    - cron: "0 20 * * *" # adjust to your project's own "off hours"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether there's something to test yet
+        id: probe
+        run: |
+          # EXAMPLE probe -- replace with your own project's real markers,
+          # e.g.: [ -f pubspec.yaml ] && [ -d integration_test ]
+          #       [ -f package.json ] && [ -d e2e ]
+          if [ -f <YOUR_DEPENDENCY_MANIFEST> ] && [ -d <YOUR_E2E_TEST_DIR> ]; then
+            echo "app_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_exists=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to test yet -- skipping cleanly."
+          fi
+
+      - name: Set up toolchain
+        if: steps.probe.outputs.app_exists == 'true'
+        run: |
+          echo "Replace this step with your stack's real setup action,"
+          echo "e.g. subosito/flutter-action@v2, actions/setup-node@v4, etc."
+
+      - name: Run E2E suite
+        if: steps.probe.outputs.app_exists == 'true'
+        id: e2e
+        run: |
+          set +e
+          # Replace with your project's real E2E command.
+          <YOUR_E2E_TEST_COMMAND> 2>&1 | tee e2e-output.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: File an issue on failure
+        if: steps.probe.outputs.app_exists == 'true' && steps.e2e.outputs.exit_code != '0'
+        run: |
+          gh issue create \
+            --title "Nightly E2E failure -- $(date -u +%Y-%m-%d)" \
+            --label "e2e-failure,needs-clarification" \
+            --body "$(printf 'Nightly E2E run failed.\n\n<details><summary>Log (tail)</summary>\n\n```\n%s\n```\n</details>\n\nRun: %s' "$(tail -c 4000 e2e-output.log)" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

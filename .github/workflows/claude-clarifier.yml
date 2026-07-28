@@ -1,0 +1,149 @@
+name: Claude Clarifier
+
+# Handles a requirement issue that did NOT come through the local Spec-Kit
+# pipeline (constitution → specify → clarify → plan → tasks → taskstoissues)
+# -- e.g. an ad-hoc idea a human typed straight into the Kanban board. Its
+# ONLY job is a routing decision: is this concrete enough to route into the
+# local pipeline, or does it need clarifying questions first? It does NOT
+# decompose specs into task issues itself -- that's `/speckit-tasks` +
+# `speckit-taskstoissues`'s job, run locally, once per feature, producing a
+# real tasks.md before any GitHub issue exists. See
+# docs/INCIDENTS-AND-LESSONS.md for why: an earlier version of this workflow
+# tried to have an LLM invent the spec→task breakdown live inside a GitHub
+# Action, and that (combined with a separate self-triggering bug) produced
+# 20+ runs and ~28 duplicate issues on the very first live run of this
+# pattern.
+#
+# REQUIRED EDITS before this workflow will work on your repo:
+#   - Replace <OWNER>, <PROJECT_NUMBER>, <PROJECT_ID>, <STATUS_FIELD_ID>, and
+#     every <..._OPTION_ID> below with the real values from your own GitHub
+#     Project (v2) board -- see SETUP-GUIDE.md step 3.
+#   - Adjust the constitution/spec file paths in the prompt if you renamed
+#     anything.
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  id-token: write
+
+jobs:
+  clarify:
+    # EXCLUDES issues that already carry `ready-for-dev` or `awaiting-review`
+    # at creation time -- every task issue seeded from tasks.md via
+    # `speckit-taskstoissues` gets `ready-for-dev` set atomically at
+    # creation, specifically so it never reaches this workflow at all. See
+    # "Incident: the self-triggering loop" in docs/INCIDENTS-AND-LESSONS.md
+    # for why this guard exists and what happens without it.
+    if: >
+      (github.event_name == 'issues' && github.event.action == 'opened' &&
+       !contains(github.event.issue.labels.*.name, 'ready-for-dev') &&
+       !contains(github.event.issue.labels.*.name, 'awaiting-review')) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.action == 'created' &&
+       !github.event.comment.performed_via_github_app &&
+       contains(github.event.issue.labels.*.name, 'needs-clarification'))
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --max-turns 30
+            --model claude-sonnet-5
+            --allowedTools Read,Bash,Grep,Glob
+          prompt: |
+            You are the CLARIFIER agent for this project's spec-driven
+            pipeline. Issue #${{ github.event.issue.number }} reached you as
+            a GitHub issue that did NOT go through this project's local
+            Spec-Kit pipeline (no `ready-for-dev` label at creation) --
+            either a fresh ad-hoc idea, or a reply to your own earlier
+            clarifying questions on it.
+
+            Issue #${{ github.event.issue.number }}: "${{ github.event.issue.title }}"
+            ${{ github.event.issue.body }}
+
+            Your ONLY job is a routing decision. You do NOT write task issues
+            yourself -- that is `/speckit-tasks` + the `speckit-taskstoissues`
+            skill's job, run locally against a real spec/plan/tasks.md, never
+            invented live inside this Action.
+
+            Steps:
+            1. Read `.specify/memory/constitution.md` -- binding for every
+               decision below.
+            2. Read every `specs/*/spec.md` (and, if present, that spec's
+               `plan.md`/`tasks.md`) to see if this issue is already covered.
+            3. Read your contract file(s) (e.g. `api/openapi.yaml`) if the
+               issue touches an external API or integration surface -- an
+               issue implying an endpoint/capability NOT already documented
+               there is itself ambiguous.
+            4. Decide: does satisfying this issue require a NEW spec (or a
+               material change to an existing one), or is it something a
+               human should just run the local Spec-Kit pipeline on?
+
+            IF THE REQUEST IS AMBIGUOUS (missing acceptance criteria,
+            conflicts with the constitution, conflicts with an existing spec,
+            or needs a product decision only the owner can make):
+              - Post a comment
+                (`gh issue comment ${{ github.event.issue.number }} --body "..."`)
+                with the SPECIFIC questions that must be answered. Do not
+                guess.
+              - Ensure `needs-clarification` is applied
+                (`gh issue edit ${{ github.event.issue.number }} --add-label needs-clarification`).
+              - Move its project board card to "Needs Clarification" (see
+                Project board wiring below).
+              - Stop.
+
+            IF THE REQUEST IS CLEAR ENOUGH TO PROCEED (either from the start,
+            or because this comment resolved your prior questions):
+              - Do NOT create task issues yourself. Instead, comment
+                explaining that this request is ready for the local Spec-Kit
+                pipeline, and name the concrete next command a human should
+                run in an interactive Claude Code session in this repo:
+                `/speckit-specify <a restatement of this issue's request>`
+                (or, if it clearly extends an EXISTING spec rather than
+                needing a new one, name that spec file and suggest
+                `/speckit-plan`/`/speckit-tasks` be re-run against it instead).
+              - Remove `needs-clarification` if present, move this issue's
+                board card to "Backlog" (not "Ready for Dev" -- this issue
+                itself is never implemented directly; the spec that comes
+                out of it is what gets decomposed into real task issues).
+              - Stop. Do not implement any code, and do not create further
+                issues -- a human runs the local pipeline from here.
+
+            Constitution/contract-file amendments are a human-review-only
+            path -- if satisfying this issue would require changing the
+            constitution or your API contract file, say so and stop rather
+            than editing those files yourself.
+
+            ## Project board wiring
+
+            Board: <OWNER>/<REPO>, project number <PROJECT_NUMBER>.
+              PROJECT_ID=<PROJECT_ID>
+              STATUS_FIELD_ID=<STATUS_FIELD_ID>
+              BACKLOG_OPTION_ID=<BACKLOG_OPTION_ID>
+              NEEDS_CLARIFICATION_OPTION_ID=<NEEDS_CLARIFICATION_OPTION_ID>
+              READY_FOR_DEV_OPTION_ID=<READY_FOR_DEV_OPTION_ID>
+              IN_REVIEW_OPTION_ID=<IN_REVIEW_OPTION_ID>
+              DONE_OPTION_ID=<DONE_OPTION_ID>
+
+            Use `GH_TOKEN="$PROJECT_TOKEN" gh project ...` for every board
+            command (the default token has no Projects access). If this
+            issue isn't on the board yet, add it yourself rather than
+            polling for the built-in auto-add automation:
+              `GH_TOKEN="$PROJECT_TOKEN" gh project item-add <PROJECT_NUMBER> --owner <OWNER> --url <this-issue-url> --format json --jq '.id'`
+            then set its status:
+              `GH_TOKEN="$PROJECT_TOKEN" gh project item-edit --id <item-id> --project-id <PROJECT_ID> --field-id <STATUS_FIELD_ID> --single-select-option-id <option-id>`
+            If it's already on the board (added by a prior run of this
+            workflow, or by a human), look it up instead of re-adding:
+              `GH_TOKEN="$PROJECT_TOKEN" gh project item-list <PROJECT_NUMBER> --owner <OWNER> --format json --limit 200`

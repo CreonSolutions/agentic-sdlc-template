@@ -1,0 +1,83 @@
+name: CI
+
+# Ordinary CI -- lint/format/analyze/build/test. The one non-obvious part is
+# the last step: it labels the PR `ci-green`/`ci-red` directly, which is the
+# signal claude-reviewer.yml reads as its hard CI-status gate. Do not remove
+# that step even if you otherwise gut/replace this file for your own stack --
+# the reviewer workflow has no other reliable way to know whether CI passed
+# (see docs/INCIDENTS-AND-LESSONS.md: gh pr checks / mergeStateStatus are
+# both dead ends here, for two different structural reasons).
+#
+# REQUIRED EDITS: replace the toolchain setup + lint/test steps with your
+# project's real commands. Keep the "Label PR with this job's outcome" step
+# (job name, label names, and permissions) unchanged.
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether there's something to build yet
+        id: probe
+        run: |
+          # EXAMPLE probe -- replace with your project's real dependency
+          # manifest, e.g.: [ -f pubspec.yaml ], [ -f package.json ], etc.
+          if [ -f <YOUR_DEPENDENCY_MANIFEST> ]; then
+            echo "app_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_exists=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to build/lint yet -- skipping cleanly."
+          fi
+
+      - name: Set up toolchain
+        if: steps.probe.outputs.app_exists == 'true'
+        run: |
+          echo "Replace with your stack's real setup action."
+
+      - name: Install dependencies
+        if: steps.probe.outputs.app_exists == 'true'
+        run: echo "Replace with your project's real install command."
+
+      - name: Format check
+        if: steps.probe.outputs.app_exists == 'true'
+        run: echo "Replace with your project's real format --check command."
+
+      - name: Lint / static analysis
+        if: steps.probe.outputs.app_exists == 'true'
+        run: echo "Replace with your project's real analyze/lint command."
+
+      - name: Tests
+        if: steps.probe.outputs.app_exists == 'true'
+        run: echo "Replace with your project's real test command."
+
+      # The Claude GitHub App installation commonly has no Checks API access
+      # at all, so a reviewer agent can't read this job's pass/fail via
+      # `gh pr checks` or any check-run/status-rollup route. It also can't
+      # reliably use mergeStateStatus (CLEAN/UNSTABLE) as a substitute: the
+      # reviewer's own workflow run is ITSELF a pending check on the same PR
+      # for its whole duration (triggered by pull_request:), so
+      # mergeStateStatus can never read CLEAN while the reviewer is the one
+      # asking -- a structural paradox, not a permissions bug. Sidestep the
+      # whole checks/mergeState system: this job labels the PR directly with
+      # its own outcome, which the reviewer reads with plain PR-read access
+      # (no Checks permission needed at all).
+      - name: Label PR with this job's outcome
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --add-label ci-green --remove-label ci-red || true
+          else
+            gh pr edit ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --add-label ci-red --remove-label ci-green || true
+          fi

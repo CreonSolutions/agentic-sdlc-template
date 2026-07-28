@@ -1,0 +1,284 @@
+# Incidents and Lessons
+
+Real failures hit while bootstrapping this pattern twice, and the fixes —
+already baked into every workflow file in this template. Read this before
+you loosen any trigger condition, permission block, or safety cap; each one
+here exists because something concrete broke without it.
+
+## Incident: the self-triggering loop
+
+On the very first real run of this pipeline, the clarifier workflow's
+`issues: opened` trigger had no exclusion for issues **created by the
+pipeline itself**. Child task issues are created with `ready-for-dev` (and
+sometimes a `spec:NNN`) labels set atomically at creation — and GitHub fires
+a discrete `issues.labeled` event for each label applied that way, *in
+addition to* the one `issues.opened` event. Since the trigger only checked
+`action == 'opened'` with no label exclusion, each child issue's own
+`opened` event re-invoked the clarifier **on itself**, which (not
+recognizing it was already a fully-scoped, TDD-sized task) could create
+further child issues.
+
+Compounding this: a human reply-comment on an issue still labeled
+`needs-clarification` also re-triggers the clarifier via the
+`issue_comment: created` path — and closing an issue with `gh issue close
+--comment "..."` posts a comment too, so an operator's own housekeeping
+comment can trigger a real agent run if the gating condition isn't precise
+about which comments count.
+
+**Net effect:** ~20 clarifier runs and several coder runs fired within about
+90 seconds, producing ~28-33 duplicate/orphaned child issues before it was
+caught and everything in flight was cancelled. No PRs or code commits
+resulted (the coder runs failed before reaching that point), but real
+Claude API spend was burned on the runaway runs, and — separately — a real
+credential posted as a clarifying answer ended up copied in plaintext into
+over a dozen duplicate issue bodies simply because so many redundant
+breakdowns ran off the same (correct) answer.
+
+**The fix**, now baked into `claude-clarifier.yml` in this template from the
+start:
+
+```yaml
+if: >
+  (github.event_name == 'issues' && github.event.action == 'opened' &&
+   !contains(github.event.issue.labels.*.name, 'ready-for-dev') &&
+   !contains(github.event.issue.labels.*.name, 'awaiting-review')) ||
+  (github.event_name == 'issue_comment' && ...)
+```
+
+## Incident: two first-run snags with `claude-code-action` itself
+
+1. **Bot actor blocked by default.** `claude-code-action` refuses to run
+   when the triggering actor is a bot (`Workflow initiated by non-human
+   actor: claude (type: Bot)`) — a real anti-loop safeguard on Anthropic's
+   side. The reviewer workflow reacts to a PR the coder bot itself opens
+   and labels, so it needs an explicit, narrowly-scoped allow-list:
+   ```yaml
+   with:
+     allowed_bots: "claude"   # NOT "*" -- only your own bot identity
+   ```
+2. **Reviewer can't self-approve.** The coder and reviewer both
+   authenticate as the same GitHub App installation (the same bot
+   account), so `gh pr review --approve` fails with `Can not approve your
+   own pull request`. The reviewer prompt tells the agent to fall back to
+   a plain comment with its verdict when this happens (rather than
+   treating it as an error) — this still works given the constitution
+   already requires a human to be the one who actually clicks merge; a
+   formal GitHub "Approved" review state is only worth chasing (via a
+   second bot identity/PAT) if branch-protection rules need to count it.
+3. **`pull_request`-triggered workflow-file validation.** GitHub requires a
+   PR-triggered workflow's file content to match the default branch's
+   version before running it (a separate safeguard from the two above) —
+   if you fix a workflow file *after* a PR's branch already exists, that
+   PR's existing runs will silently self-skip with "workflow validation
+   failed" until the PR branch is updated (merge/rebase main into it) or a
+   fresh PR is opened. Re-running or re-labeling alone does not help; the
+   PR branch itself needs the fix.
+
+## Incident: the reviewer had the identical multi-label self-trigger bug
+
+The clarifier's `issues: opened` guard was fixed to exclude events where
+labels applied at creation would cause redundant re-firing — but the
+**reviewer's own `pull_request: labeled` trigger had the identical bug**,
+just never exercised until a PR happened to get 2+ labels at creation. A PR
+opened with `awaiting-review` + `spec:NNN` together fired the reviewer 3
+times on the *same, unchanged* diff within about a minute (GitHub fires a
+separate `labeled` event per label even when applied atomically, and the
+job's `if` only checked "is `awaiting-review` currently present" — true for
+every one of those events), plus a 4th time when the auto-revise safety
+cap's own `blocked` label landed. The cap correctly stopped after 3 review
+verdicts and flagged for a human — the safety net worked — but it tripped
+on redundant duplicate reviews, not genuine repeated revision failures,
+which is misleading in the PR history.
+
+**Fix** (same shape as the clarifier's): for a `labeled` action
+specifically, only proceed if *that event's own label* was the trigger
+label, not merely "is it present":
+```yaml
+if: >
+  contains(github.event.pull_request.labels.*.name, 'awaiting-review') &&
+  (github.event.action != 'labeled' || github.event.label.name == 'awaiting-review')
+```
+
+**Lesson for any future pipeline setup:** the "could a successful run of
+this workflow cause this trigger to fire again" question needs to be asked
+separately for **every** label-gated trigger in the pipeline, not just the
+one where it was first discovered — the issue-side and PR-side triggers
+are separate code paths with the same footgun, and fixing one does not fix
+the other.
+
+A second, related bug lived in the auto-revise cap itself: it originally
+counted **all-time** request-changes reviews on a PR, not reviews since the
+last push. A PR that crossed the cap once (even from the duplicate-review
+bug above, since fixed) stayed permanently capped/blocked forever after,
+even for a genuinely fresh single review of already-fixed code. Fixed by
+counting only reviews submitted after the current HEAD commit's date:
+```bash
+HEAD_DATE=$(gh api repos/OWNER/REPO/pulls/N/commits --jq 'sort_by(.commit.committer.date) | last | .commit.committer.date')
+# then filter reviews to `.submittedAt >= $HEAD_DATE` before counting
+```
+**Lesson:** any "N strikes and stop" safety cap on a mutable, revisable
+artifact (a PR, not a one-shot issue) needs to measure "strikes against the
+*current* state," not lifetime strikes — otherwise the cap can never reset
+even after the actual problem is fixed.
+
+## Incident: reviewer approved a PR with failing CI
+
+The reviewer's prompt asked it to review the diff for correctness, but
+never explicitly told it to check the PR's actual CI status — it sometimes
+re-ran the linter/formatter itself as part of "ordinary correctness," and
+sometimes didn't. This produced an `APPROVE` verdict on a commit whose own
+CI run had already failed on an unformatted-file check — the review and
+the CI failure were both real, just inconsistent with each other.
+
+**Fix:** made checking real CI status step 0 — a hard gate before any other
+review step — rather than leaving it to the model's discretion whether to
+re-derive the same signal manually. Any failing or pending check is now an
+automatic blocker regardless of diff quality.
+
+**Lesson:** don't ask an LLM reviewer to *re-verify* a signal that a
+deterministic CI system already computed for the exact same commit — query
+the real result directly and treat it as authoritative.
+
+**Follow-on:** even with a CI-gate instruction in the prompt, a file failed
+the exact same format check on *two separate* revise attempts before it
+actually went green — each attempt's own local verification reported
+clean. The coder's sandbox toolchain version is not guaranteed to match the
+CI runner's pinned version (a `channel: stable`-style setup action resolves
+to whatever's current *that day*), so "I ran the formatter locally, it's
+clean" is not reliable evidence — CI's result is the only one that counts.
+
+**Second follow-on — the real root cause of a much longer stuck loop:** the
+CI-gate fix (step 0, "check `gh pr checks`") looked right but didn't
+actually work: the reviewer workflow's `permissions:` block had no
+`checks`/`statuses` scope, so `gh pr checks`/the commit-status API/
+`check-runs` all 403'd inside the reviewer's own run — *even after CI had
+genuinely gone green*. The reviewer correctly treated "I can't verify CI"
+as itself a blocker (a sound defensive default) and kept requesting changes
+on that basis alone, for several rounds, regardless of how clean the actual
+diff was. **Lesson:** a workflow step that reads GitHub state beyond
+issues/PRs/contents (check runs, commit statuses, deployments, etc.) needs
+its own explicit permission scope — the job silently degrades to "I can't
+tell, so I'll assume the worst" rather than erroring loudly, which reads as
+plausible reviewer caution rather than a permissions bug unless you dig
+into why every round cites the identical unverifiable-CI complaint.
+
+**Third follow-on — adding the permission scope didn't actually fix it.**
+`checks: read`/`statuses: read` in the workflow file's own `permissions:`
+block can only *restrict* what the underlying GitHub App installation
+already has — it cannot *grant* a permission the App was never authorized
+for at the installation level. If the Claude GitHub App installation you're
+using has no Checks API access at all, `gh pr checks`, `.../check-runs`,
+`.../check-suites`, `.../status`, and the GraphQL `checkSuites` field all
+still 403 even with the scope declared in your workflow file.
+
+The reviewer itself found the actual working signal:
+`gh pr view <N> --json mergeable,mergeStateStatus` — `mergeStateStatus:
+"CLEAN"` means every check passed; anything else (`UNSTABLE`, `BLOCKED`,
+`DIRTY`, ...) means at least one check is failing or still pending. This
+field comes from standard PR-read permission, not Checks, so it works with
+no further permission changes.
+
+**Lesson:** when a permission-scoped API is unavailable because of the
+*App installation's* fixed grant (not the workflow file), stop trying to
+fix it in the workflow YAML — look for a different field on an API surface
+the integration already has access to that carries an equivalent signal.
+
+## Incident: the CI-status gate was structurally unsatisfiable (15 stuck rounds)
+
+`mergeStateStatus` turned out to be the wrong fix too, for a subtler reason
+than a permissions gap: **the reviewer workflow that reads
+`mergeStateStatus` is itself triggered by `pull_request:`, so its own run
+is a pending check on the exact commit it's evaluating, for its entire
+duration.** `mergeStateStatus` aggregates ALL checks on a commit —
+including the one currently asking the question. It is structurally
+impossible for it to read `CLEAN` from inside a `pull_request`-triggered
+workflow, regardless of whether every *other* check (the real CI job) has
+actually passed. This produced the exact observed pattern for 15 review
+verdicts straight: coder pushes → real CI goes green → reviewer wakes up,
+reads `UNSTABLE` (its own in-flight run) → blocks → auto-revise pushes a
+cosmetic/no-op change → repeat.
+
+**Fix:** stop reading any check/merge-state aggregate at all. Have the
+actual CI workflow (`ci.yml`) label the PR directly with its own outcome
+(`ci-green`/`ci-red`) as its last step (`if: always()`, using the default
+`GITHUB_TOKEN` with `pull-requests: write` — no Checks permission needed,
+since labeling a PR is plain PR-write access). The reviewer then reads that
+label with ordinary `gh pr view --json labels`, fully sidestepping the
+Checks API and the self-referential `mergeStateStatus` trap. A workflow's
+own run can label a PR without that label-write ever appearing as a
+"check" on the commit, so there's no recursion.
+
+**Lesson, generalized:** any time an automation needs to know "did some
+other process finish and what did it conclude," prefer a signal that
+process writes *itself* (a label, a comment, a status file committed to a
+known path) over a shared aggregate/rollup that the asking process's own
+execution might contribute to. Aggregates that include "am I done yet" as
+an input to "is everything done" are a trap for exactly this reason —
+obvious in hindsight, easy to miss when the aggregate reads like a clean,
+official API for the question you're actually asking.
+
+## Incident: coder/revise both ran out of turns on toolchain-heavy tasks
+
+A task requiring a full toolchain bootstrap (installing the SDK from
+scratch, then running the real test suite for verification) used 54 of the
+coder's original 60 max-turns budget and ended "successfully" without ever
+pushing a branch or opening a PR — most of its budget went to environment
+setup before it could run tests/lint for real verification. Simpler
+config-only tasks in the same batch only used 41-50 of 60. The auto-revise
+workflow hit the identical wall shortly after.
+
+**Fix:** raised both the coder and revise workflows' `--max-turns` to 90 (the
+defaults shipped in this template).
+
+**Lesson:** any task requiring a real toolchain bootstrap + verification
+cycle needs meaningfully more turn budget than a comment-only or
+config-only task — tune for the heaviest realistic task in your repo, not
+the average one, especially once real code (not just scaffolding) starts
+landing.
+
+## General lessons for any future pipeline setup
+
+1. Any workflow reacting to `issues`/`pull_request` events must positively
+   exclude events the pipeline's own prior actions would generate. Ask,
+   for every trigger: *"could a successful run of this workflow itself
+   cause this trigger to fire again?"*
+2. Prefer **explicit, synchronous board-wiring** (`gh project item-add`
+   returns the new item's id directly) over polling/retrying for GitHub's
+   built-in "Auto-add to project" automation to catch up — a retry-loop
+   pattern (`sleep 10`, several attempts) is itself a contributing cause of
+   turn-budget exhaustion, since retries burn agent turns.
+3. `--max-turns` should have headroom for the full task including any
+   retries/board-wiring, not just the "happy path" turn count — the
+   clarifier's real first task (read constitution + all specs + contract,
+   then create several child issues with individual `gh` calls each)
+   needed more turns than a small initial budget gave it.
+4. Never let an agent (or an operator) write a real credential value into
+   issue/PR text, even as a "temporary, obviously-going-to-be-replaced"
+   answer to a clarifying question — issue comments are permanent in a
+   repo's history the moment they're posted, and get echoed into whatever
+   the agent creates next. Use placeholder tokens in all spec/issue text
+   (`<API_KEY>`, etc.) and supply real values only via gitignored local
+   config or CI secrets, never in git-adjacent text.
+
+## Environment note: cloud-synced folders + native build toolchains don't mix
+
+If your project has a native build step (Gradle/Kotlin, native compiled
+dependencies, etc.) and your local checkout lives inside a cloud-sync
+folder (OneDrive, Dropbox, Google Drive Desktop), expect intermittent,
+hard-to-diagnose build failures — access-denied errors, "not a regular
+file," cloud-operation timeouts — because the sync client's
+placeholder/on-demand-download layer can't keep up with the build tool's
+incremental cache churning through thousands of small files.
+
+Also watch for a second, separate problem if you move the project to fix
+the first one: some incremental compilers (observed with Kotlin) compute a
+relative path between the project and a cached dependency source file for
+build-cache keys, and that computation can fail outright across Windows
+drive letters (`this and base files have different roots`) if your package
+cache and project end up on different drives.
+
+**Fix that works:** keep native-toolchain projects on the *same drive* as
+your package/dependency cache, *outside* any cloud-synced tree (e.g.
+`C:\dev\<repo>` rather than `C:\Users\<user>\OneDrive\...\<repo>`). Push/pull
+to keep this local build copy in sync with a cloud-hosted "working" copy if
+you edit in both places.

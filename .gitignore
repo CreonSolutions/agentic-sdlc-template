@@ -1,0 +1,10 @@
+# Local secrets -- never commit real credential values
+*.local.json
+.env
+.env.*
+android/local.properties
+*.local.properties
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db

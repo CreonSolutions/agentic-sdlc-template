@@ -1,0 +1,111 @@
+name: Claude Coder
+
+# Implements a task issue once it's labeled `ready-for-dev`, test-first (a
+# failing test before any implementation), and opens a PR linked back to the
+# issue. Never merges its own PR.
+#
+# --max-turns 90: tune this to the heaviest realistic task in your repo, not
+# the average one. On the reference project, a task that required bootstrapping
+# a full toolchain (installing the SDK, running the real test suite for
+# verification) burned 54/60 turns and stopped "successfully" -- without
+# ever pushing a branch -- because most of its budget went to environment
+# setup before it could verify anything. Simpler config-only tasks used
+# 41-50/60. Give real headroom rather than tuning per-task; see
+# docs/INCIDENTS-AND-LESSONS.md.
+#
+# REQUIRED EDITS before this workflow will work on your repo:
+#   - Replace <OWNER>, <PROJECT_NUMBER>, <PROJECT_ID>, <STATUS_FIELD_ID>,
+#     <IN_REVIEW_OPTION_ID> with your real Project (v2) board values.
+#   - Replace the constitution reference / contract-file reference / secret
+#     placeholder pattern with whatever your project actually uses.
+#   - Swap the `dart format` step for your stack's real formatter, or remove
+#     it if your CI doesn't gate on formatting.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  checks: read
+  statuses: read
+
+jobs:
+  implement:
+    if: >
+      github.event.label.name == 'ready-for-dev' &&
+      !contains(github.event.issue.labels.*.name, 'blocked')
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          claude_args: |
+            --max-turns 90
+            --model claude-sonnet-5
+            --allowedTools Read,Write,Edit,Bash,Grep,Glob
+          prompt: |
+            You are the CODER agent for this project's spec-driven pipeline,
+            implementing task issue
+            #${{ github.event.issue.number }}: "${{ github.event.issue.title }}"
+            ${{ github.event.issue.body }}
+
+            Rules (binding -- read `.specify/memory/constitution.md` first):
+            - Test-first: write a failing test before any implementation
+              code for this task.
+            - Contract-first: if this task touches an external API, validate
+              against your contract file (e.g. `api/openapi.yaml`) as
+              written -- do NOT edit the contract yourself; if the task seems
+              to require an endpoint/capability not already in the contract,
+              stop and comment on the issue explaining why, labeling it
+              `blocked`, rather than improvising.
+            - Real credential/secret VALUES never appear in code, tests, or
+              commits -- use placeholder tokens (e.g. `<API_KEY>`) wired to a
+              gitignored local config / CI secret. If the issue body contains
+              a literal-looking real credential, treat that as a bug in the
+              issue itself: use the placeholder anyway and note the
+              discrepancy in your PR description.
+            - YAGNI: implement exactly what the linked spec and this issue
+              ask for -- nothing the constitution marks out of scope.
+            - If the task turns out to be ambiguous once you're in the code,
+              stop, comment on the issue with what's unclear, label it
+              `needs-clarification`, and do not guess.
+
+            - **Formatting, unconditionally, every time, no exceptions:**
+              run your project's formatter (applying it, not just checking)
+              as the LAST step before every commit -- including inside
+              auto-revise rounds. Do not trust a prior "I already verified
+              this locally" note from earlier in this issue/PR's history as
+              evidence the CURRENT diff is formatted -- re-run the formatter
+              yourself, on the files you are about to commit, right before
+              you commit them, every single time, even if you believe you
+              already did. (This exact failure mode -- an unformatted file
+              CI catches after a round claimed to verify locally -- recurred
+              repeatedly on the reference project; see
+              docs/INCIDENTS-AND-LESSONS.md.)
+
+            When the implementation and its test(s) are green:
+            1. Create a branch named `agent/issue-${{ github.event.issue.number }}-<slug>`.
+            2. Commit your changes.
+            3. Open a PR against the default branch with `Fixes #${{ github.event.issue.number }}`
+               in the description, summarizing what you built and how it was
+               tested.
+            4. Label the PR `awaiting-review`.
+            5. Move this issue's project board card to "In Review" yourself --
+               do not assume a built-in automation will do it:
+               ```
+               GH_TOKEN="$PROJECT_TOKEN" gh project item-list <PROJECT_NUMBER> --owner <OWNER> --format json --limit 200
+               # find the entry whose content.number == ${{ github.event.issue.number }}, read its id
+               GH_TOKEN="$PROJECT_TOKEN" gh project item-edit --id <item-id> --project-id <PROJECT_ID> --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_REVIEW_OPTION_ID>
+               ```
+            6. Do not merge -- a separate reviewer pass must approve first.
