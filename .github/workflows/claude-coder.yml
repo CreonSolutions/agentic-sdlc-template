@@ -106,6 +106,17 @@ jobs:
                ```
                GH_TOKEN="$PROJECT_TOKEN" gh project item-list <PROJECT_NUMBER> --owner <OWNER> --format json --limit 200
                # find the entry whose content.number == ${{ github.event.issue.number }}, read its id
+               ```
+               **If no entry matches this issue number** (this happens for
+               issues seeded directly -- bug reports, or manually-created
+               task issues -- which skip the clarifier by design and so are
+               never added to the board by anything else), add it yourself
+               rather than skipping this step:
+               ```
+               GH_TOKEN="$PROJECT_TOKEN" gh project item-add <PROJECT_NUMBER> --owner <OWNER> --url "https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}" --format json --jq '.id'
+               ```
+               Then, with whichever item id you have (found or just added):
+               ```
                GH_TOKEN="$PROJECT_TOKEN" gh project item-edit --id <item-id> --project-id <PROJECT_ID> --field-id <STATUS_FIELD_ID> --single-select-option-id <IN_REVIEW_OPTION_ID>
                ```
             6. Do not merge -- a separate reviewer pass must approve first.

@@ -282,3 +282,35 @@ your package/dependency cache, *outside* any cloud-synced tree (e.g.
 `C:\dev\<repo>` rather than `C:\Users\<user>\OneDrive\...\<repo>`). Push/pull
 to keep this local build copy in sync with a cloud-hosted "working" copy if
 you edit in both places.
+
+## Incident: directly-seeded task/bug issues silently never reach the Projects board
+
+Several task/bug issues were created directly via `gh issue create --label
+"ready-for-dev,..."` (the normal way to file a bug found through manual
+testing, or to seed a task without going through `speckit-taskstoissues`)
+and never appeared on the GitHub Projects board at all, even after their
+PRs merged. No error, no comment anywhere — the issues just silently never
+got a board card.
+
+**Root cause:** `claude-clarifier.yml` has explicit "if this issue isn't on
+the board yet, add it yourself" logic — but that workflow deliberately
+never runs for issues created with `ready-for-dev` already set (the
+trigger-hygiene guard from the very first incident in this doc). Nothing
+else in the pipeline does an unconditional `item-add`: `claude-coder.yml`'s
+own board-wiring step only lists existing items and edits the one that
+matches, assuming the item is already present. For a directly-seeded
+issue, that assumption is false, so the coder's `item-edit` silently has
+nothing to match, and the issue stays off the board forever with no
+failure signal anywhere.
+
+**Fix:** `claude-coder.yml` in this template already has the same "not
+found → add it yourself" fallback the clarifier has (see the workflow
+file) — don't remove it if you're trimming the prompts down, and apply the
+same pattern to any future workflow that edits a board item by looking it
+up first.
+
+**Lesson:** "assume a prior step already did X" is exactly the kind of
+implicit dependency that fails silently the moment the prior step is
+skipped for a legitimate reason (here, the clarifier being skipped on
+purpose for directly-seeded issues) — every consumer of shared state
+should be able to establish that state itself, not just react to it.
