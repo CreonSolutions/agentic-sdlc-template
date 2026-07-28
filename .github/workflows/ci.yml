@@ -56,6 +56,14 @@ jobs:
         if: steps.probe.outputs.app_exists == 'true'
         run: echo "Replace with your project's real analyze/lint command."
 
+      # Do not skip or forget this step when adapting this file for your
+      # stack. On the reference project, an early version of this file
+      # never had a real test step wired in -- only format+lint -- so
+      # ci-green never actually verified any PR's test-pass claims for
+      # that project's entire history, contradicting the constitution's
+      # own CI-gate requirement. It was caught incidentally by a reviewer
+      # agent reviewing unrelated code, not by design. See
+      # docs/INCIDENTS-AND-LESSONS.md.
       - name: Tests
         if: steps.probe.outputs.app_exists == 'true'
         run: echo "Replace with your project's real test command."

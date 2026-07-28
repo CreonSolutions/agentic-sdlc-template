@@ -432,3 +432,35 @@ credential's effective permissions, test every distinct operation your
 pipeline actually calls, not just the first one that happens to fail
 loudly — read and write access to the same nominal resource can require
 different scopes entirely.
+
+## Incident: CI never actually ran the test suite, for a project's entire history
+
+On the reference project, an early `ci.yml` ran exactly two checks —
+format and static analysis — and labeled the PR `ci-green`/`ci-red` from
+those two alone. There was no test-execution step at all. Every merged
+PR's test-pass claim ("139/139 passing", "154 tests passed", ...) was
+self-reported in the PR body by the same coder agent that wrote the
+tests, and never independently verified by the one mechanism (`ci-green`)
+the reviewer is required to treat as a hard gate — directly contradicting
+a constitution requiring "analyze → contract tests → unit (coverage
+gate) → build. No merge on red."
+
+This was not caught by design, by CI failing, or by a human audit — it
+was caught by the *reviewer agent itself*, incidentally, while reviewing
+an unrelated PR, as a non-blocking observation: it noted `ci-green`
+couldn't actually substantiate the PR's test claim, flagged it as a
+separate concern for the owner, and correctly did not hold that PR's
+merge over a pipeline gap it didn't introduce.
+
+**Fix:** this template's own `ci.yml` already has a "Tests" step (see the
+comment on it) — the lesson is to never delete or skip it when adapting
+this file for a real stack, since "format + lint only" looks like a
+complete CI job right up until a real regression ships behind a green
+checkmark.
+
+**Lesson:** a CI gate is only as trustworthy as the checks actually wired
+into it. "The constitution requires X" and "the CI step is named
+`analyze-and-format`" (or similar) are both statements about *intent*,
+not evidence that X is actually happening — the same class of gap as the
+`PROJECT_TOKEN` scope incidents above. Read the actual file, don't trust
+the name or the prior belief about what it covers.
